@@ -1,0 +1,161 @@
+#!/bin/bash
+#
+# RAID Management System
+# Copyright (c) 2025 Beijing Tangta Technology Co., ltd
+# 
+# This software is licensed under the MIT License
+# See LICENSE file for full license details
+#
+# Description: RAID Health Check Script - Multi-Array Support
+# Version: 1.0
+# Author: Tarik Aslan
+#
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${BLUE}=== RAID Health Check (Multi-Array) ===${NC}"
+
+# Get all active RAID arrays
+ACTIVE_ARRAYS=$(grep "^md" /proc/mdstat | awk '{print $1}' | sort)
+
+if [ -z "$ACTIVE_ARRAYS" ]; then
+    echo -e "${YELLOW}No active RAID arrays found${NC}"
+    echo "To start arrays, run: raid-start"
+    exit 0
+fi
+
+echo -e "${CYAN}Found ${#ACTIVE_ARRAYS[@]} active array(s): ${ACTIVE_ARRAYS}${NC}"
+echo ""
+
+for ARRAY in $ACTIVE_ARRAYS; do
+    ARRAY_NAME="/dev/$ARRAY"
+    
+    echo -e "${BLUE}=== Array: $ARRAY_NAME ===${NC}"
+    
+    # Get basic info
+    MDSTAT=$(grep -A3 "^$ARRAY" /proc/mdstat)
+    DETAILS=$(sudo mdadm --detail "$ARRAY_NAME" 2>/dev/null)
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Could not get details for $ARRAY_NAME${NC}"
+        echo ""
+        continue
+    fi
+    
+    # Basic status line
+    echo "$MDSTAT" | head -1
+    
+    echo ""
+    echo -e "${CYAN}=== Health Status ===${NC}"
+    
+    # Check state from mdadm detail
+    STATE_LINE=$(echo "$DETAILS" | grep "State :")
+    STATE=$(echo "$STATE_LINE" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # Check if resync/recovery is active
+    if echo "$MDSTAT" | grep -q "resync"; then
+        SYNC_TYPE="resync"
+    elif echo "$MDSTAT" | grep -q "recovery"; then
+        SYNC_TYPE="recovery"
+    else
+        SYNC_TYPE=""
+    fi
+    
+    if [ -n "$SYNC_TYPE" ]; then
+        echo -e "${YELLOW}🔄 State: $STATE${NC}"
+        
+        # Get sync details from mdstat
+        SYNC_LINE=$(echo "$MDSTAT" | grep "$SYNC_TYPE")
+        
+        # Extract progress
+        PROGRESS=$(echo "$SYNC_LINE" | grep -o "$SYNC_TYPE = [0-9.]*%" | cut -d= -f2 | tr -d ' ' | head -1)
+        if [ -n "$PROGRESS" ]; then
+            echo -e "${YELLOW}📊 ${SYNC_TYPE^} Progress: $PROGRESS${NC}"
+        fi
+        
+        # Extract remaining time
+        REMAINING=$(echo "$SYNC_LINE" | grep -o 'finish=[0-9.]*min' | cut -d= -f2 | head -1)
+        if [ -n "$REMAINING" ]; then
+            echo -e "${YELLOW}⏱️  Time Remaining: ${REMAINING} minutes${NC}"
+        fi
+        
+        # Extract speed
+        SPEED=$(echo "$SYNC_LINE" | grep -o 'speed=[0-9.]*[KM]*/sec' | cut -d= -f2 | head -1)
+        if [ -n "$SPEED" ]; then
+            echo -e "${YELLOW}🚀 Speed: $SPEED${NC}"
+        fi
+        
+        # Show data size if available
+        BLOCKS=$(echo "$SYNC_LINE" | grep -o "$SYNC_TYPE = [0-9.]*% ([0-9]*/[0-9]*)" | grep -o '([0-9]*/[0-9]*)' | tr -d '()' | head -1)
+        if [ -n "$BLOCKS" ]; then
+            COMPLETED_BLOCKS=$(echo "$BLOCKS" | cut -d'/' -f1)
+            TOTAL_BLOCKS=$(echo "$BLOCKS" | cut -d'/' -f2)
+            COMPLETED_GB=$((COMPLETED_BLOCKS / 1024 / 1024))
+            TOTAL_GB=$((TOTAL_BLOCKS / 1024 / 1024))
+            REMAINING_GB=$(( (TOTAL_BLOCKS - COMPLETED_BLOCKS) / 1024 / 1024 ))
+            echo -e "${YELLOW}💾 Data: ${COMPLETED_GB}GB / ${TOTAL_GB}GB (${REMAINING_GB}GB remaining)${NC}"
+        fi
+    else
+        echo -e "${GREEN}✓ State: $STATE${NC}"
+        echo -e "${GREEN}✓ Sync Status: Fully synchronized${NC}"
+    fi
+    
+    # Check devices
+    FAILED_DEVICES=$(echo "$DETAILS" | grep "Failed Devices" | awk '{print $NF}')
+    WORKING_DEVICES=$(echo "$DETAILS" | grep "Working Devices" | awk '{print $NF}')
+    TOTAL_DEVICES=$(echo "$DETAILS" | grep "Raid Devices" | awk '{print $NF}')
+    
+    if [ "$FAILED_DEVICES" = "0" ]; then
+        echo -e "${GREEN}✓ Failed Devices: 0${NC}"
+    else
+        echo -e "${RED}✗ Failed Devices: $FAILED_DEVICES${NC}"
+    fi
+    
+    if [ "$WORKING_DEVICES" = "$TOTAL_DEVICES" ]; then
+        echo -e "${GREEN}✓ Working Devices: $WORKING_DEVICES/$TOTAL_DEVICES${NC}"
+    else
+        echo -e "${RED}✗ Working Devices: $WORKING_DEVICES/$TOTAL_DEVICES${NC}"
+    fi
+    
+    # Show RAID level and size
+    RAID_LEVEL=$(echo "$DETAILS" | grep "Raid Level" | awk '{print $NF}')
+    ARRAY_SIZE=$(echo "$DETAILS" | grep "Array Size" | cut -d: -f2- | sed 's/^[[:space:]]*//')
+    echo -e "${CYAN}🔧 RAID Level: $RAID_LEVEL${NC}"
+    echo -e "${CYAN}💽 Array Size: $ARRAY_SIZE${NC}"
+    
+    # Show devices
+    echo ""
+    echo -e "${CYAN}=== Devices ===${NC}"
+    sudo mdadm --detail "$ARRAY_NAME" | grep -E "/dev/" | head -10
+    
+    # Show events
+    EVENTS=$(echo "$DETAILS" | grep "Events" | awk '{print $NF}')
+    echo -e "${CYAN}Events: $EVENTS${NC}"
+    
+    echo ""
+    echo "----------------------------------------"
+    echo ""
+done
+
+# Show inactive arrays that might exist
+INACTIVE_ARRAYS=$(sudo mdadm --examine --scan 2>/dev/null | grep -o "md[0-9]*" | sort -u)
+ACTIVE_ARRAY_NAMES=$(echo "$ACTIVE_ARRAYS" | tr '\n' '|')
+
+if [ -n "$INACTIVE_ARRAYS" ]; then
+    for INACTIVE in $INACTIVE_ARRAYS; do
+        if ! echo "$ACTIVE_ARRAY_NAMES" | grep -q "$INACTIVE"; then
+            if [ -z "$INACTIVE_SHOWN" ]; then
+                echo -e "${YELLOW}=== Inactive Arrays ===${NC}"
+                INACTIVE_SHOWN=1
+            fi
+            echo -e "${YELLOW}○ $INACTIVE (inactive) - run 'raid-start' to activate${NC}"
+        fi
+    done
+    echo ""
+fi

@@ -1,0 +1,314 @@
+#!/bin/bash
+#
+# RAID Management System
+# Copyright (c) 2025 Beijing Tangta Technology Co., ltd
+# 
+# This software is licensed under the MIT License
+# See LICENSE file for full license details
+#
+# Description: RAID Start Script - Multi-Array Support
+# Version: 1.0
+# Author: Tarik Aslan
+#
+
+#!/bin/bash
+# RAID Start Script - Multi-Array Support
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${BLUE}=== RAID Array Starter ===${NC}"
+
+# Function to normalize array names (handle both /dev/md0 and /dev/md/0)
+normalize_array_name() {
+    local array_name="$1"
+    # Convert /dev/md/0 to /dev/md0
+    echo "$array_name" | sed 's|/dev/md/|/dev/md|'
+}
+
+# Function to find actual device name
+find_actual_device() {
+    local array_name="$1"
+    local normalized_name=$(normalize_array_name "$array_name")
+
+    # Check if normalized name exists
+    if [ -b "$normalized_name" ]; then
+        echo "$normalized_name"
+        return 0
+    fi
+
+    # Check if original name exists
+    if [ -b "$array_name" ]; then
+        echo "$array_name"
+        return 0
+    fi
+
+    # Try alternative naming (md/0 vs md0)
+    if [[ "$array_name" == /dev/md* ]]; then
+        local alt_name=$(echo "$array_name" | sed 's|/dev/md|/dev/md/|')
+        if [ -b "$alt_name" ]; then
+            echo "$alt_name"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Function to check if filesystem exists
+check_filesystem() {
+    local device="$1"
+    if sudo blkid "$device" | grep -q "TYPE="; then
+        return 0  # Filesystem exists
+    else
+        return 1  # No filesystem
+    fi
+}
+
+# Function to create filesystem
+create_filesystem() {
+    local device="$1"
+    echo -e "${CYAN}No filesystem found on $device${NC}"
+    echo -e "${YELLOW}Available filesystem types:${NC}"
+    echo "  1) ext4 (Recommended for general use)"
+    echo "  2) xfs (High performance, large files)"
+    echo "  3) btrfs (Advanced features, snapshots)"
+    echo "  4) Cancel"
+
+    read -p "Select filesystem type (1-4): " fs_choice
+    case $fs_choice in
+        1)
+            echo -e "${CYAN}Creating ext4 filesystem on $device...${NC}"
+            sudo mkfs.ext4 -F "$device"
+            ;;
+        2)
+            echo -e "${CYAN}Creating xfs filesystem on $device...${NC}"
+            sudo mkfs.xfs -f "$device"
+            ;;
+        3)
+            echo -e "${CYAN}Creating btrfs filesystem on $device...${NC}"
+            sudo mkfs.btrfs -f "$device"
+            ;;
+        4)
+            echo -e "${YELLOW}Filesystem creation cancelled${NC}"
+            return 1
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Filesystem creation cancelled.${NC}"
+            return 1
+            ;;
+    esac
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ Filesystem created successfully${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Filesystem creation failed${NC}"
+        return 1
+    fi
+}
+
+# Function to mount array
+mount_array() {
+    local device="$1"
+    local array_number="$2"
+    local mount_point="/mnt/usb-raid${array_number}"
+
+    # Create mount point if it doesn't exist
+    if [ ! -d "$mount_point" ]; then
+        echo -e "${CYAN}Creating mount point: $mount_point${NC}"
+        sudo mkdir -p "$mount_point"
+    fi
+
+    # Check if already mounted
+    if mountpoint -q "$mount_point"; then
+        echo -e "${YELLOW}✓ Already mounted at $mount_point${NC}"
+        return 0
+    fi
+
+    # Mount the device
+    echo -e "${CYAN}Mounting $device to $mount_point...${NC}"
+    if sudo mount "$device" "$mount_point"; then
+        echo -e "${GREEN}✓ Successfully mounted to $mount_point${NC}"
+
+        # Show filesystem info
+        echo ""
+        echo -e "${CYAN}Mount information:${NC}"
+        df -h "$device" | head -2
+        df -h "$device" | grep "$device"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to mount $device${NC}"
+        return 1
+    fi
+}
+
+# Function to handle post-start actions (filesystem check and mount)
+post_start_actions() {
+    local device="$1"
+    local array_number="$2"
+
+    echo ""
+    echo -e "${BLUE}=== Post-Start Actions ===${NC}"
+
+    # Check if filesystem exists
+    if check_filesystem "$device"; then
+        echo -e "${GREEN}✓ Filesystem detected on $device${NC}"
+        FS_TYPE=$(sudo blkid "$device" | grep -o 'TYPE="[^"]*"' | cut -d'"' -f2)
+        echo -e "${CYAN}Filesystem type: $FS_TYPE${NC}"
+
+        # Ask if user wants to mount
+        read -p "Mount the array automatically? (Y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            echo -e "${YELLOW}Mount skipped. Use 'raid-mount${array_number}' to mount later.${NC}"
+        else
+            mount_array "$device" "$array_number"
+        fi
+    else
+        echo -e "${YELLOW}⚠ No filesystem found on $device${NC}"
+        read -p "Create a filesystem and mount automatically? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if create_filesystem "$device"; then
+                mount_array "$device" "$array_number"
+            fi
+        else
+            echo -e "${YELLOW}Filesystem creation skipped. Use 'sudo mkfs.ext4 $device' to create later.${NC}"
+        fi
+    fi
+}
+
+# Check if specific array is requested
+if [ $# -eq 1 ]; then
+    ARRAY_INPUT="$1"
+
+    # Normalize input to proper device name
+    if [[ "$ARRAY_INPUT" =~ ^[0-9]+$ ]]; then
+        # If just a number, try both naming conventions
+        ARRAY_NAME="/dev/md$ARRAY_INPUT"
+        ALT_ARRAY_NAME="/dev/md/$ARRAY_INPUT"
+        ARRAY_NUMBER="$ARRAY_INPUT"
+    elif [[ "$ARRAY_INPUT" == /dev/md* ]]; then
+        ARRAY_NAME="$ARRAY_INPUT"
+        ALT_ARRAY_NAME=$(echo "$ARRAY_INPUT" | sed 's|/dev/md|/dev/md/|')
+        # Extract array number from device name
+        ARRAY_NUMBER=$(echo "$ARRAY_INPUT" | grep -o '[0-9]\+$')
+    else
+        ARRAY_NAME="/dev/md$ARRAY_INPUT"
+        ALT_ARRAY_NAME="/dev/md/$ARRAY_INPUT"
+        ARRAY_NUMBER="$ARRAY_INPUT"
+    fi
+
+    echo -e "${CYAN}Starting specific array: $ARRAY_NAME${NC}"
+
+    # Try to find the actual device name
+    ACTUAL_DEVICE=$(find_actual_device "$ARRAY_NAME")
+
+    if [ -n "$ACTUAL_DEVICE" ]; then
+        echo -e "${YELLOW}Array already exists: $ACTUAL_DEVICE${NC}"
+        post_start_actions "$ACTUAL_DEVICE" "$ARRAY_NUMBER"
+        exit 0
+    fi
+
+    # Try to assemble by UUID first
+    UUID=$(sudo mdadm --examine --scan 2>/dev/null | grep "$ARRAY_NAME" | grep -o 'UUID=[^ ]*' | cut -d= -f2)
+    if [ -n "$UUID" ]; then
+        echo -e "${CYAN}Attempting to assemble by UUID: $UUID${NC}"
+        if sudo mdadm --assemble --scan --uuid="$UUID" 2>/dev/null; then
+            echo -e "${GREEN}✓ Started $ARRAY_NAME by UUID${NC}"
+            ACTUAL_DEVICE=$(find_actual_device "$ARRAY_NAME")
+            post_start_actions "$ACTUAL_DEVICE" "$ARRAY_NUMBER"
+            exit 0
+        fi
+    fi
+
+    # Try alternative device name
+    ALT_UUID=$(sudo mdadm --examine --scan 2>/dev/null | grep "$ALT_ARRAY_NAME" | grep -o 'UUID=[^ ]*' | cut -d= -f2)
+    if [ -n "$ALT_UUID" ]; then
+        echo -e "${CYAN}Attempting to assemble alternative: $ALT_ARRAY_NAME${NC}"
+        if sudo mdadm --assemble --scan --uuid="$ALT_UUID" 2>/dev/null; then
+            echo -e "${GREEN}✓ Started $ALT_ARRAY_NAME by UUID${NC}"
+            ACTUAL_DEVICE=$(find_actual_device "$ALT_ARRAY_NAME")
+            post_start_actions "$ACTUAL_DEVICE" "$ARRAY_NUMBER"
+            exit 0
+        fi
+    fi
+
+    # Final attempt: try to assemble with available components
+    echo -e "${CYAN}Attempting manual assembly...${NC}"
+    if sudo mdadm --assemble "$ARRAY_NAME" --run 2>/dev/null; then
+        echo -e "${GREEN}✓ Started $ARRAY_NAME${NC}"
+        ACTUAL_DEVICE=$(find_actual_device "$ARRAY_NAME")
+        post_start_actions "$ACTUAL_DEVICE" "$ARRAY_NUMBER"
+    elif sudo mdadm --assemble "$ALT_ARRAY_NAME" --run 2>/dev/null; then
+        echo -e "${GREEN}✓ Started $ALT_ARRAY_NAME${NC}"
+        ACTUAL_DEVICE=$(find_actual_device "$ALT_ARRAY_NAME")
+        post_start_actions "$ACTUAL_DEVICE" "$ARRAY_NUMBER"
+    else
+        echo -e "${RED}✗ Failed to start $ARRAY_NAME${NC}"
+        echo -e "${YELLOW}Available arrays:${NC}"
+        sudo mdadm --examine --scan 2>/dev/null
+    fi
+    exit 0
+fi
+
+# Rest of the script for starting all arrays (without post-start actions)
+echo -e "${CYAN}Starting all available RAID arrays...${NC}"
+echo ""
+
+STARTED_COUNT=0
+FAILED_COUNT=0
+
+# Try to assemble all arrays by UUID first
+sudo mdadm --assemble --scan 2>/dev/null
+
+# Check each array defined in mdadm.conf or available components
+sudo mdadm --examine --scan 2>/dev/null | while read line; do
+    ARRAY_DEV=$(echo "$line" | awk '{print $2}' | sed "s/^device=//" | sed "s/,$//")
+    if [ -n "$ARRAY_DEV" ] && [[ "$ARRAY_DEV" == /dev/md* ]]; then
+        ARRAY_NAME=$(basename "$ARRAY_DEV")
+
+        # Skip if already active
+        if [ -b "$ARRAY_DEV" ]; then
+            echo -e "${YELLOW}○ $ARRAY_DEV already active${NC}"
+            continue
+        fi
+
+        # Get the base name without path for checking active arrays
+        BASE_NAME=$(echo "$ARRAY_DEV" | sed 's|/dev/||')
+
+        # Skip if already active (check /proc/mdstat)
+        if grep -q "^$BASE_NAME" /proc/mdstat 2>/dev/null; then
+            echo -e "${YELLOW}○ $ARRAY_DEV already active in mdstat${NC}"
+            continue
+        fi
+
+        # Try to assemble
+        echo -e "${CYAN}Starting $ARRAY_DEV...${NC}"
+        if sudo mdadm --assemble "$ARRAY_DEV" --run 2>/dev/null; then
+            echo -e "${GREEN}✓ Started $ARRAY_DEV${NC}"
+            STARTED_COUNT=$((STARTED_COUNT + 1))
+        else
+            echo -e "${RED}✗ Failed to start $ARRAY_DEV${NC}"
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+        fi
+        echo ""
+    fi
+done
+
+echo -e "${CYAN}=== Summary ===${NC}"
+echo -e "${GREEN}Started: $STARTED_COUNT array(s)${NC}"
+if [ $FAILED_COUNT -gt 0 ]; then
+    echo -e "${RED}Failed: $FAILED_COUNT array(s)${NC}"
+fi
+
+# Show final status
+echo ""
+echo -e "${CYAN}Current active arrays:${NC}"
+grep "^md" /proc/mdstat 2>/dev/null || echo "None"

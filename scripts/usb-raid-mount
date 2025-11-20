@@ -1,0 +1,146 @@
+#!/bin/bash
+#
+# RAID Management System
+# Copyright (c) 2025 Beijing Tangta Technology Co., ltd
+# 
+# This software is licensed under the MIT License
+# See LICENSE file for full license details
+#
+# Description: USB RAID Mount Script - Multi-Array Support
+# Version: 1.0
+# Author: Tarik Aslan
+#
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Default array number if none specified
+ARRAY_NUMBER=${1:-0}
+ARRAY_DEVICE="/dev/md${ARRAY_NUMBER}"
+MOUNT_POINT="/mnt/usb-raid${ARRAY_NUMBER}"
+
+log() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_usage() {
+    echo "Usage: $0 [array-number]"
+    echo ""
+    echo "Examples:"
+    echo "  $0           # Mount /dev/md0 to /mnt/usb-raid0"
+    echo "  $0 0         # Mount /dev/md0 to /mnt/usb-raid0" 
+    echo "  $0 1         # Mount /dev/md1 to /mnt/usb-raid1"
+    echo "  $0 2         # Mount /dev/md2 to /mnt/usb-raid2"
+    echo ""
+    echo "Available arrays:"
+    for dev in /dev/md*; do
+        if [ -b "$dev" ]; then
+            echo "  $dev"
+        fi
+    done
+    if ! ls /dev/md* >/dev/null 2>&1; then
+        echo "  No RAID arrays found"
+    fi
+}
+
+# Show help if requested
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_usage
+    exit 0
+fi
+
+# Validate array number
+if ! [[ "$ARRAY_NUMBER" =~ ^[0-9]+$ ]]; then
+    error "Invalid array number: $1"
+    echo "Array number must be a positive integer"
+    show_usage
+    exit 1
+fi
+
+main() {
+    log "Attempting to mount USB RAID array ${ARRAY_NUMBER}..."
+    
+    # Check if array device exists
+    if [ ! -b "$ARRAY_DEVICE" ]; then
+        error "RAID array $ARRAY_DEVICE not found or not assembled"
+        echo ""
+        warn "Available arrays:"
+        for dev in /dev/md*; do
+            if [ -b "$dev" ]; then
+                echo "  $dev"
+            fi
+        done
+        echo ""
+        log "To start the array, run: raid-start ${ARRAY_NUMBER}"
+        log "Or manually: sudo mdadm --assemble $ARRAY_DEVICE --run"
+        exit 1
+    fi
+
+    # Create mount point if it doesn't exist
+    if [ ! -d "$MOUNT_POINT" ]; then
+        log "Creating mount point: $MOUNT_POINT"
+        sudo mkdir -p "$MOUNT_POINT"
+        if [ $? -ne 0 ]; then
+            error "Failed to create mount point: $MOUNT_POINT"
+            exit 1
+        fi
+        log "Mount point created successfully"
+    else
+        log "Mount point exists: $MOUNT_POINT"
+    fi
+
+    # Check if already mounted
+    if mountpoint -q "$MOUNT_POINT"; then
+        warn "$ARRAY_DEVICE is already mounted at $MOUNT_POINT"
+        echo "Mounted filesystem info:"
+        df -h "$ARRAY_DEVICE" 2>/dev/null || df -h "$MOUNT_POINT"
+        exit 0
+    fi
+
+    # Check if device is already mounted elsewhere
+    MOUNTED_WHERE=$(findmnt -n -o TARGET "$ARRAY_DEVICE" 2>/dev/null)
+    if [ -n "$MOUNTED_WHERE" ]; then
+        warn "$ARRAY_DEVICE is already mounted at $MOUNTED_WHERE"
+        echo "Use: sudo umount $MOUNTED_WHERE to unmount first"
+        exit 1
+    fi
+
+    # Mount the array
+    log "Mounting $ARRAY_DEVICE to $MOUNT_POINT..."
+    if sudo mount "$ARRAY_DEVICE" "$MOUNT_POINT"; then
+        log "Successfully mounted $ARRAY_DEVICE to $MOUNT_POINT"
+        
+        # Show filesystem info
+        echo ""
+        log "Filesystem information:"
+        df -h "$MOUNT_POINT"
+        
+        # Show mount details
+        echo ""
+        log "Mount details:"
+        findmnt -n -o SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE% "$ARRAY_DEVICE"
+    else
+        error "Failed to mount $ARRAY_DEVICE"
+        error "Possible reasons:"
+        error "1. No filesystem created on the array"
+        error "2. Filesystem type not recognized"
+        error "3. Mount point issues"
+        echo ""
+        log "To create a filesystem: sudo mkfs.ext4 $ARRAY_DEVICE"
+        exit 1
+    fi
+}
+
+main "$@"

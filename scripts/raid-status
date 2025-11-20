@@ -1,0 +1,98 @@
+#!/bin/bash
+#
+# RAID Management System
+# Copyright (c) 2025 Beijing Tangta Technology Co., ltd
+# 
+# This software is licensed under the MIT License
+# See LICENSE file for full license details
+#
+# Description: RAID Status Script - Multi-Array Support
+# Version: 1.0
+# Author: Tarik Aslan
+#
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${BLUE}=== RAID Status Overview ===${NC}"
+echo ""
+
+# Show /proc/mdstat summary
+echo -e "${CYAN}=== /proc/mdstat ===${NC}"
+cat /proc/mdstat
+echo ""
+
+# Get all active RAID arrays
+ACTIVE_ARRAYS=$(grep "^md" /proc/mdstat | awk '{print $1}' | sort)
+
+if [ -z "$ACTIVE_ARRAYS" ]; then
+    echo -e "${YELLOW}No active RAID arrays${NC}"
+else
+    echo -e "${CYAN}=== Active Arrays Summary ===${NC}"
+    echo ""
+    
+    for ARRAY in $ACTIVE_ARRAYS; do
+        ARRAY_NAME="/dev/$ARRAY"
+        DETAILS=$(sudo mdadm --detail "$ARRAY_NAME" 2>/dev/null)
+        
+        if [ $? -eq 0 ]; then
+            STATE=$(echo "$DETAILS" | grep "State :" | cut -d: -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            RAID_LEVEL=$(echo "$DETAILS" | grep "Raid Level" | awk '{print $NF}')
+            ARRAY_SIZE=$(echo "$DETAILS" | grep "Array Size" | cut -d: -f2- | sed 's/^[[:space:]]*//' | cut -d'(' -f1 | sed 's/[[:space:]]*$//')
+            FAILED_DEVICES=$(echo "$DETAILS" | grep "Failed Devices" | awk '{print $NF}')
+            WORKING_DEVICES=$(echo "$DETAILS" | grep "Working Devices" | awk '{print $NF}')
+            TOTAL_DEVICES=$(echo "$DETAILS" | grep "Raid Devices" | awk '{print $NF}')
+            
+            # Status indicator
+            if [ "$FAILED_DEVICES" = "0" ] && ! echo "$STATE" | grep -q "resyncing"; then
+                STATUS_INDICATOR="${GREEN}●${NC}"
+            elif echo "$STATE" | grep -q "resyncing"; then
+                STATUS_INDICATOR="${YELLOW}🔄${NC}"
+            else
+                STATUS_INDICATOR="${RED}●${NC}"
+            fi
+            
+            echo -e "$STATUS_INDICATOR $ARRAY_NAME: $RAID_LEVEL, $ARRAY_SIZE, $WORKING_DEVICES/$TOTAL_DEVICES devices"
+            echo -e "   State: $STATE"
+            
+            # Show sync progress if applicable
+            if echo "$STATE" | grep -q "resyncing"; then
+                SYNC_INFO=$(grep -A2 "^$ARRAY" /proc/mdstat | grep "resync" | head -1)
+                PROGRESS=$(echo "$SYNC_INFO" | grep -o 'resync = [0-9.]*%' | cut -d= -f2 | tr -d ' ' | head -1)
+                if [ -n "$PROGRESS" ]; then
+                    echo -e "   Resync: $PROGRESS"
+                fi
+            fi
+            echo ""
+        else
+            echo -e "${RED}● $ARRAY_NAME: Could not get details${NC}"
+            echo ""
+        fi
+    done
+fi
+
+# Show available but inactive arrays (fixed parsing)
+echo -e "${CYAN}=== Available Arrays ===${NC}"
+INACTIVE_SHOWN=0
+sudo mdadm --examine --scan 2>/dev/null | while read line; do
+    # Extract array device name properly
+    ARRAY_DEV=$(echo "$line" | awk '{print $2}' | sed "s/^device=//" | sed "s/,$//")
+    if [ -n "$ARRAY_DEV" ] && [[ "$ARRAY_DEV" == /dev/md* ]]; then
+        ARRAY_NAME=$(basename "$ARRAY_DEV")
+        if ! echo "$ACTIVE_ARRAYS" | grep -q "^$ARRAY_NAME$"; then
+            if [ $INACTIVE_SHOWN -eq 0 ]; then
+                INACTIVE_SHOWN=1
+            fi
+            echo -e "${YELLOW}○ $ARRAY_DEV (inactive)${NC}"
+        fi
+    fi
+done
+
+if [ $INACTIVE_SHOWN -eq 0 ]; then
+    echo -e "${GREEN}All defined arrays are active${NC}"
+fi

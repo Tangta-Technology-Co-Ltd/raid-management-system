@@ -1,0 +1,38 @@
+#!/bin/bash
+#
+# RAID Management System
+# Copyright (c) 2025 Beijing Tangta Technology Co., ltd
+# 
+# This software is licensed under the MIT License
+# See LICENSE file for full license details
+#
+# Description: List all RAID arrays
+# Version: 1.0
+# Author: Tarik Aslan
+#
+
+echo "=== All RAID Arrays ==="
+echo ""
+
+echo "1. Active arrays (from /proc/mdstat):"
+if grep -q "^md" /proc/mdstat; then
+    grep "^md" /proc/mdstat
+else
+    echo "None"
+fi
+
+echo ""
+echo "2. Defined arrays (from mdadm --examine --scan):"
+sudo mdadm --examine --scan 2>/dev/null | while read line; do
+    ARRAY_DEV=$(echo "$line" | awk '{print $2}' | sed "s/^device=//" | sed "s/,$//")
+    UUID=$(echo "$line" | grep -o 'UUID=[^ ]*')
+    if [ -n "$ARRAY_DEV" ]; then
+        echo "   $ARRAY_DEV - $UUID"
+    fi
+done
+
+echo ""
+echo "3. Block devices:"
+# Show both naming conventions
+ls -la /dev/md* /dev/md/* 2>/dev/null | grep -v "\\[" || echo "No RAID block devices found"
+
